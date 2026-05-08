@@ -36,6 +36,10 @@ export interface ClientContext {
     version?: string;
   };
   transport?: "stdio" | "http";
+  /** Origin (`scheme://host[:port]`) the client used to reach this server.
+   *  Used to find the right entry in the MCP client's config when injecting
+   *  the bearer token after sign-in. */
+  serverOrigin?: string;
 }
 
 /**

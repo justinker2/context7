@@ -9,14 +9,22 @@ import { formatSearchResults, extractClientInfoFromUserAgent } from "./lib/utils
 import { isJWT, validateJWT } from "./lib/jwt.js";
 import express from "express";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { Command } from "commander";
 import { AsyncLocalStorage } from "async_hooks";
+import { randomUUID } from "crypto";
 import {
   SERVER_VERSION,
   RESOURCE_URL,
   AUTH_SERVER_URL,
   OPENAI_APPS_CHALLENGE_TOKEN,
 } from "./lib/constants.js";
+import {
+  loadStdioToken,
+  recordCallAndDecide,
+  promptForAuth,
+  inlineAuthNudge,
+} from "./lib/auth/index.js";
 
 /** Default HTTP server port */
 const DEFAULT_PORT = 3000;
@@ -76,20 +84,52 @@ const requestContext = new AsyncLocalStorage<ClientContext>();
 let stdioApiKey: string | undefined;
 let stdioClientInfo: { ide?: string; version?: string } | undefined;
 
+type ToolResult = { content: { type: "text"; text: string }[] };
+
 /**
- * Get the effective client context
+ * Wraps a tool handler so that on each call we record an unauthenticated tool
+ * use against the user's prompt-state and, when the threshold is reached,
+ * fire an MCP elicitation asking them to sign in. Clients that don't support
+ * elicitation get a passive tip appended to the tool's text result instead.
  */
+function withAuthPrompt<Args>(
+  server: McpServer,
+  handler: (args: Args) => Promise<ToolResult>
+): (args: Args) => Promise<ToolResult> {
+  return async (args) => {
+    const context = getClientContext();
+    const result = await handler(args);
+    const decision = recordCallAndDecide(context);
+    if (!decision.shouldPrompt) return result;
+
+    let shown = false;
+    try {
+      const outcome = await promptForAuth({ context, server: server.server });
+      shown = outcome.shown;
+    } catch (error) {
+      console.error("[Context7] Auth prompt failed:", error);
+    }
+
+    if (!shown && result.content.length > 0) {
+      const rateLimited = result.content.some(
+        (c) => c.type === "text" && /quota exceeded|rate.?limit/i.test(c.text)
+      );
+      const nudge = inlineAuthNudge(context, { rateLimited });
+      const last = result.content[result.content.length - 1];
+      if (last.type === "text") {
+        last.text = `${last.text}\n\n${nudge}`;
+      }
+    }
+    return result;
+  };
+}
+
 function getClientContext(): ClientContext {
   const ctx = requestContext.getStore();
-
-  // HTTP mode: context is fully populated from request
-  if (ctx) {
-    return ctx;
-  }
-
-  // stdio mode: use globals
+  if (ctx) return ctx;
+  // stdio mode: fall back to the credentials file shared with `ctx7 login`.
   return {
-    apiKey: stdioApiKey,
+    apiKey: stdioApiKey ?? loadStdioToken(),
     clientInfo: stdioClientInfo,
     transport: "stdio",
   };
@@ -203,7 +243,7 @@ IMPORTANT: Do not call this tool more than 3 times per question. If you cannot f
         idempotentHint: true,
       },
     },
-    async ({ query, libraryName }) => {
+    withAuthPrompt(server, async ({ query, libraryName }) => {
       const searchResponse = await searchLibraries(query, libraryName, getClientContext());
 
       if (!searchResponse.results || searchResponse.results.length === 0) {
@@ -233,7 +273,7 @@ ${resultsText}`;
           },
         ],
       };
-    }
+    })
   );
 
   server.registerTool(
@@ -264,7 +304,7 @@ Do not call this tool more than 3 times per question.`,
         idempotentHint: true,
       },
     },
-    async ({ query, libraryId }) => {
+    withAuthPrompt(server, async ({ query, libraryId }) => {
       const response = await fetchLibraryContext({ query, libraryId }, getClientContext());
 
       return {
@@ -275,7 +315,7 @@ Do not call this tool more than 3 times per question.`,
           },
         ],
       };
-    }
+    })
   );
 
   return server;
@@ -332,22 +372,30 @@ async function main() {
       );
     };
 
+    // Stateful session registry. Required for server-initiated requests
+    // (elicitation): the SDK silently drops server-to-client traffic when no
+    // session-bound standalone SSE stream is open.
+    interface Session {
+      transport: StreamableHTTPServerTransport;
+      server: ReturnType<typeof createMcpServer>;
+      context: ClientContext;
+    }
+    const sessions = new Map<string, Session>();
+
+    const sendJsonError = (
+      res: express.Response,
+      status: number,
+      code: number,
+      message: string
+    ) => {
+      res.status(status).json({ jsonrpc: "2.0", error: { code, message }, id: null });
+    };
+
     const handleMcpRequest = async (
       req: express.Request,
       res: express.Response,
       requireAuth: boolean
     ) => {
-      // Reject GET requests — this server is stateless and does not send server-initiated
-      // notifications, so SSE streams serve no purpose and cause mass NGINX timeouts.
-      // Returning 405 is spec-compliant per MCP StreamableHTTP (2025-03-26).
-      if (req.method === "GET") {
-        return res.status(405).json({
-          jsonrpc: "2.0",
-          error: { code: -32000, message: "Server does not support GET requests" },
-          id: null,
-        });
-      }
-
       try {
         const apiKey = extractApiKey(req);
         const resourceUrl = RESOURCE_URL;
@@ -361,53 +409,96 @@ async function main() {
 
         if (requireAuth) {
           if (!apiKey) {
-            return res.status(401).json({
-              jsonrpc: "2.0",
-              error: {
-                code: -32001,
-                message: "Authentication required. Please authenticate to use this MCP server.",
-              },
-              id: null,
-            });
+            return sendJsonError(
+              res,
+              401,
+              -32001,
+              "Authentication required. Please authenticate to use this MCP server."
+            );
           }
-
           if (isJWT(apiKey)) {
             const validationResult = await validateJWT(apiKey);
             if (!validationResult.valid) {
-              return res.status(401).json({
-                jsonrpc: "2.0",
-                error: {
-                  code: -32001,
-                  message: validationResult.error || "Invalid token. Please re-authenticate.",
-                },
-                id: null,
-              });
+              return sendJsonError(
+                res,
+                401,
+                -32001,
+                validationResult.error || "Invalid token. Please re-authenticate."
+              );
             }
           }
         }
 
+        const sessionId = extractHeaderValue(req.headers["mcp-session-id"]);
+        const body = req.body as { method?: string } | undefined;
+        // Pick up tokens written by an earlier OAuth-via-elicitation flow
+        // when the server runs on the same machine as the user. No-op for
+        // remote deployments where the credentials file isn't accessible.
+        const effectiveApiKey = apiKey ?? loadStdioToken();
+
+        if (sessionId && sessions.has(sessionId)) {
+          const session = sessions.get(sessionId)!;
+          // Prefer the canonical name from the MCP initialize handshake
+          // (e.g. "codex", "claude-code") over whatever the User-Agent says,
+          // since we use it to find the matching MCP client config to update
+          // after OAuth.
+          const sdkClientInfo = session.server.server.getClientVersion();
+          const perRequestContext: ClientContext = {
+            ...session.context,
+            apiKey: effectiveApiKey ?? session.context.apiKey,
+            clientIp: getClientIp(req) ?? session.context.clientIp,
+            clientInfo: sdkClientInfo
+              ? { ide: sdkClientInfo.name, version: sdkClientInfo.version }
+              : session.context.clientInfo,
+          };
+          await requestContext.run(perRequestContext, async () => {
+            await session.transport.handleRequest(req, res, req.body);
+          });
+          return;
+        }
+
+        if (req.method !== "POST" || !body || !isInitializeRequest(body)) {
+          return sendJsonError(
+            res,
+            400,
+            -32000,
+            "Bad Request: missing or invalid Mcp-Session-Id header"
+          );
+        }
+
+        const protoHeader = extractHeaderValue(req.headers["x-forwarded-proto"]);
+        const proto = protoHeader || (req.secure ? "https" : "http");
+        const hostHeader = extractHeaderValue(req.headers["host"]) || "localhost";
+        if (process.env.CONTEXT7_AUTH_PROMPT_DEBUG === "1") {
+          console.error(
+            `[Context7:http] init headers user-agent=${extractHeaderValue(req.headers["user-agent"]) ?? "?"} mcp-protocol-version=${extractHeaderValue(req.headers["mcp-protocol-version"]) ?? "?"}`
+          );
+        }
         const context: ClientContext = {
           clientIp: getClientIp(req),
-          apiKey: apiKey,
+          apiKey: effectiveApiKey,
           clientInfo: extractClientInfoFromUserAgent(req.headers["user-agent"]),
           transport: "http",
+          serverOrigin: `${proto}://${hostHeader}`,
         };
 
-        // Use SSE responses for tool calls (enableJsonResponse: false). The SDK then
-        // flushes response headers immediately after parsing the request rather than
-        // buffering until the tool returns. This is required for long-running tools
-        // because some MCP HTTP clients cap the underlying fetch at 60s waiting for
-        // headers, even though the per-tool timeout is much higher.
         const transport = new StreamableHTTPServerTransport({
-          sessionIdGenerator: undefined,
+          sessionIdGenerator: () => randomUUID(),
           enableJsonResponse: false,
+          onsessioninitialized: (newSessionId) => {
+            sessions.set(newSessionId, { transport, server, context });
+          },
+          onsessionclosed: (closedSessionId) => {
+            sessions.delete(closedSessionId);
+          },
         });
 
         const server = createMcpServer();
-        res.on("close", () => {
-          transport.close();
-          server.close();
-        });
+        // Don't call server.close() here: McpServer.close() closes the
+        // transport, which would fire this handler again and recurse.
+        transport.onclose = () => {
+          if (transport.sessionId) sessions.delete(transport.sessionId);
+        };
 
         await requestContext.run(context, async () => {
           await server.connect(transport);
@@ -416,11 +507,7 @@ async function main() {
       } catch (error) {
         console.error("Error handling MCP request:", error);
         if (!res.headersSent) {
-          res.status(500).json({
-            jsonrpc: "2.0",
-            error: { code: -32603, message: "Internal server error" },
-            id: null,
-          });
+          sendJsonError(res, 500, -32603, "Internal server error");
         }
       }
     };
