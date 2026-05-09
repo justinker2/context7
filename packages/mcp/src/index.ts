@@ -457,12 +457,18 @@ async function main() {
           return;
         }
 
+        // Stale session ID (server restart, GC, etc.) — per MCP spec, a 404
+        // signals the client to re-initialize. A 400 would be terminal.
+        if (sessionId) {
+          return sendJsonError(res, 404, -32001, "Session not found. Re-initialize.");
+        }
+
         if (req.method !== "POST" || !body || !isInitializeRequest(body)) {
           return sendJsonError(
             res,
             400,
             -32000,
-            "Bad Request: missing or invalid Mcp-Session-Id header"
+            "Bad Request: missing Mcp-Session-Id header on non-initialize request"
           );
         }
 
@@ -479,7 +485,9 @@ async function main() {
           apiKey: effectiveApiKey,
           clientInfo: extractClientInfoFromUserAgent(req.headers["user-agent"]),
           transport: "http",
-          serverOrigin: `${proto}://${hostHeader}`,
+          // Test override: lets you exercise the remote-path inline nudge
+          // while still running the server on localhost.
+          serverOrigin: process.env.CONTEXT7_REMOTE_ORIGIN_OVERRIDE ?? `${proto}://${hostHeader}`,
         };
 
         const transport = new StreamableHTTPServerTransport({

@@ -44,6 +44,15 @@ export async function promptForAuth({ context, server }: PromptOptions): Promise
   const caps = clientCapabilities(server);
   debug("promptForAuth", { transport: context.transport, caps, count: state.count });
 
+  // For remote HTTP servers, neither URL-mode (clients reject it) nor
+  // form-mode-then-server-opens-browser (the server isn't on the user's
+  // machine) actually delivers a clickable sign-in path. Skip elicit and
+  // fall through to the inline tool-result nudge, whose markdown link DOES
+  // render clickably in agent chat output.
+  if (context.transport === "http" && !isLocalServerOrigin(context.serverOrigin)) {
+    return { shown: false };
+  }
+
   if (!caps.form && !caps.url) return { shown: false };
 
   if (context.transport === "stdio") {
@@ -67,6 +76,16 @@ export async function promptForAuth({ context, server }: PromptOptions): Promise
     if (accepted) return { shown: true };
   }
   return { shown: false };
+}
+
+function isLocalServerOrigin(origin: string | undefined): boolean {
+  if (!origin) return true;
+  try {
+    const host = new URL(origin).hostname;
+    return host === "localhost" || host === "127.0.0.1" || host === "::1";
+  } catch {
+    return false;
+  }
 }
 
 export interface InlineAuthNudgeOptions {
@@ -97,6 +116,22 @@ function isLocalServer(serverOrigin: string | undefined): boolean {
   }
 }
 
+/**
+ * Map the `clientInfo.name` from the MCP initialize handshake to the
+ * matching `ctx7 setup` flag. Returns the empty string when the client is
+ * unknown — the caller falls back to interactive setup.
+ */
+function clientFlagForCli(ide: string | undefined): string {
+  if (!ide) return "";
+  const lower = ide.toLowerCase();
+  if (lower.includes("cursor")) return "--cursor";
+  if (lower.includes("claude")) return "--claude";
+  if (lower.includes("codex")) return "--codex";
+  if (lower.includes("opencode")) return "--opencode";
+  if (lower.includes("gemini")) return "--gemini";
+  return "";
+}
+
 export function inlineAuthNudge(context: ClientContext, opts: InlineAuthNudgeOptions = {}): string {
   const state = getState(context);
   if (!isForcePrompt()) {
@@ -111,21 +146,29 @@ export function inlineAuthNudge(context: ClientContext, opts: InlineAuthNudgeOpt
     : "This user is using Context7 anonymously.";
 
   // Remote deployment: the server can't run a localhost OAuth callback for
-  // the user's browser. Direct them to the `/mcp/oauth` endpoint and let
-  // their MCP client run the standard MCP-spec OAuth handshake on its own.
+  // the user's browser, and it shouldn't hold tokens at rest. The
+  // `ctx7 setup` CLI does the OAuth flow on the user's machine and writes
+  // the access token into their MCP client config; the next reconnect picks
+  // it up. We pass the right client flag so the CLI targets the editor
+  // they're actually using.
   if (context.transport !== "stdio" && !isLocalServer(context.serverOrigin)) {
-    const oauthUrl = `${context.serverOrigin}/mcp/oauth`;
+    const clientFlag = clientFlagForCli(context.clientInfo?.ide);
+    const command = clientFlag
+      ? `npx ctx7 setup ${clientFlag} --mcp -y`
+      : `npx ctx7 setup --mcp`;
     return [
       "---",
-      `**${tag} Notice for the user — please relay the following section to them, preserving the URL exactly as written:**`,
+      `**${tag} Notice for the user — please relay the following section to them and offer to run the command for them after their confirmation:**`,
       "",
-      "> You're using Context7 anonymously. To sign in for free higher rate limits and personalized library results, update your MCP client config to point at the OAuth endpoint:",
+      "> You're using Context7 anonymously. To sign in for **free** higher rate limits and personalized results, run this in your terminal:",
       ">",
-      `> \`${oauthUrl}\` (instead of \`${context.serverOrigin}/mcp\`)`,
+      "> ```",
+      `> ${command}`,
+      "> ```",
       ">",
-      "> Then restart your MCP client. It will run sign-in automatically the next time you use Context7.",
+      "> It opens the browser, completes sign-in, and writes the access token into your MCP client config. After it finishes, disable + re-enable the Context7 MCP server in your editor so the new credentials take effect.",
       "",
-      `(Background for the assistant: ${reason} The notice above is intended for the end user and should be surfaced in your reply, not buried.)`,
+      `(Background for the assistant: ${reason} Surface the notice above to the user; with their permission, you may run \`${command}\` for them via your shell tool.)`,
     ].join("\n");
   }
 
