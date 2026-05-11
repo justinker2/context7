@@ -1,0 +1,50 @@
+{
+  "name": "@upstash/context7-benchmark",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Hallucination-rate benchmark for Context7 vs baseline coding agents",
+  "type": "module",
+  "bin": {
+    "ctx7-bench": "./dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "lint": "eslint src --fix",
+    "lint:check": "eslint src",
+    "format": "prettier --write src",
+    "format:check": "prettier --check src",
+    "clean": "rm -rf dist node_modules",
+    "smoke": "tsx scripts/smoke-test.ts",
+    "download": "tsx scripts/download-dataset.ts",
+    "analyze": "tsx scripts/analyze.ts"
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "^3.0.0",
+    "@ai-sdk/google": "^3.0.0",
+    "@ai-sdk/openai": "^3.0.0",
+    "@upstash/context7-tools-ai-sdk": "workspace:*",
+    "ai": "^6.0.5",
+    "commander": "^14.0.0",
+    "dotenv": "^17.2.3",
+    "execa": "^9.5.1",
+    "p-limit": "^6.1.0",
+    "zod": "^4.3.4"
+  },
+  "devDependencies": {
+    "@types/node": "^25.0.3",
+    "tsup": "^8.5.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.8.2",
+    "vitest": "^4.0.13"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  }
+}

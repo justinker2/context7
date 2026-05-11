@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.env
+.env.local
+logs/
+runs/
+*.log
+.tsbuildinfo
+
+# Downloaded dataset cache — fetched on first `pnpm download`.
+data/gitchameleon.jsonl
+
+# Stale artifacts from earlier scaffolding rounds.
+.nia-skill/

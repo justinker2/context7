@@ -1,0 +1,20 @@
+# Sandbox image for the `claudecode` agentic mode: base python image plus
+# Node.js and the Claude Code CLI, so we can run the real production agent
+# inside the same isolated env where the pinned library is installed.
+ARG PY_VERSION=3.10
+ARG OS_VARIANT=slim-bookworm
+ARG NODE_VERSION=22.20.0
+ARG IMAGE_PREFIX=ctx7-bench
+FROM ${IMAGE_PREFIX}:py${PY_VERSION}-base
+
+ARG NODE_VERSION
+# Install Node from upstream tarball — works regardless of the underlying
+# Debian release (bookworm/bullseye/buster), which apt-based installs do not.
+RUN curl -fsSL https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz \
+    | tar -xJ -C /usr/local --strip-components=1 \
+ && node --version \
+ && npm --version
+
+# Claude Code CLI — installs `claude` into /usr/local/bin.
+RUN npm install -g @anthropic-ai/claude-code \
+ && claude --version
