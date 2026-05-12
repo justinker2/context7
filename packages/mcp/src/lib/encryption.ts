@@ -36,8 +36,7 @@ export interface ClientContext {
     version?: string;
   };
   transport?: "stdio" | "http";
-  /** MCP session ID (HTTP transport). Used as the key for per-session
-   *  auth-prompt state so a single session only gets prompted once. */
+  /** MCP session ID (HTTP transport). Keys per-session auth-prompt state. */
   sessionId?: string;
 }
 

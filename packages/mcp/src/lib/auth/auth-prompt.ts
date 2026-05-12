@@ -9,20 +9,13 @@ interface PromptState {
   fired: boolean;
 }
 
-// Keyed by HTTP session ID, or the literal "stdio" in stdio mode. The
-// server is a single process per stdio user, so one bucket is enough there.
 const stateByKey = new Map<string, PromptState>();
 
-/** Drop a session's state when the session closes — prevents unbounded growth. */
 export function forgetPromptState(key: string): void {
   stateByKey.delete(key);
 }
 
-/**
- * Record one anonymous tool call and decide whether the auth prompt should
- * fire on this call's response. Fires at most once per state key; the
- * call is ignored if it was authenticated.
- */
+/** Fires at most once per state key. Authenticated calls are skipped. */
 export function recordCallAndDecide(stateKey: string, hasAuth: boolean): boolean {
   if (hasAuth) return false;
   const s = stateByKey.get(stateKey) ?? { count: 0, fired: false };
@@ -35,11 +28,7 @@ export function recordCallAndDecide(stateKey: string, hasAuth: boolean): boolean
   return true;
 }
 
-/**
- * Map the client's IDE name from the MCP initialize handshake to the
- * matching `ctx7 setup` flag. Empty string when the client is unknown —
- * the CLI falls back to interactive setup.
- */
+/** Empty string when unknown — the CLI falls back to interactive setup. */
 export function clientFlagForCli(ide: string | undefined): string {
   if (!ide) return "";
   const lower = ide.toLowerCase();
@@ -53,17 +42,10 @@ export function clientFlagForCli(ide: string | undefined): string {
 
 export interface BuildAuthPromptOptions {
   clientIde?: string;
-  /** True when the upstream API actually returned a rate-limit / quota
-   *  error. Drives the framing of the user-facing notice. */
+  /** Set when the API returned a rate-limit / quota error. */
   rateLimited?: boolean;
 }
 
-/**
- * Render the "you're using Context7 anonymously — please run the CLI to
- * sign in" notice that the server appends to the last text content of a
- * tool result. The agent is expected to surface this to the user and,
- * with their permission, run the embedded command via its shell tool.
- */
 export function buildAuthPrompt(opts: BuildAuthPromptOptions): string {
   const flag = clientFlagForCli(opts.clientIde);
   const command = flag ? `npx ctx7 setup ${flag} --mcp -y` : `npx ctx7 setup --mcp`;

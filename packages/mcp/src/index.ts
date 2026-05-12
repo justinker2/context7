@@ -101,13 +101,6 @@ function getClientContext(): ClientContext {
 
 type ToolResult = { content: { type: "text"; text: string }[] };
 
-/**
- * Wrap a tool handler so anonymous use triggers a one-time "sign in via
- * `ctx7 setup` CLI" notice appended to the tool's text result. The agent
- * surfaces it and (with user confirmation) runs the embedded command —
- * which does OAuth on the user's machine and writes the bearer into their
- * MCP client config. Server never sees a token at rest.
- */
 function withAuthPrompt<A>(handler: (a: A) => Promise<ToolResult>): (a: A) => Promise<ToolResult> {
   return async (args) => {
     const result = await handler(args);
@@ -419,9 +412,6 @@ async function main() {
       );
     };
 
-    // Stateful session registry. Each HTTP session has its own bound
-    // transport + server pair and its own anonymous-call counter, so the
-    // auth prompt fires at most once per session.
     interface Session {
       transport: StreamableHTTPServerTransport;
       server: ReturnType<typeof createMcpServer>;
@@ -475,13 +465,10 @@ async function main() {
         const sessionId = extractHeaderValue(req.headers["mcp-session-id"]);
         const body = req.body as { method?: string } | undefined;
 
-        // Existing session — reuse the transport for POST (subsequent
-        // JSON-RPC), GET (standalone SSE stream), and DELETE.
         if (sessionId && sessions.has(sessionId)) {
           const session = sessions.get(sessionId)!;
-          // Prefer the canonical name from the initialize handshake over
-          // whatever the User-Agent says — so `--cursor`/`--claude` etc.
-          // map correctly for the auth prompt.
+          // Prefer initialize-handshake clientInfo over User-Agent — that's
+          // what makes the auth-prompt's --cursor/--claude/... map right.
           const sdkClientInfo = session.server.server.getClientVersion();
           const perRequestContext: ClientContext = {
             ...session.context,
@@ -498,8 +485,8 @@ async function main() {
           return;
         }
 
-        // Stale session ID (server restart, GC) — per MCP spec, return 404
-        // so the client silently re-initializes. A 400 would be terminal.
+        // Per MCP spec: 404 (not 400) on unknown session ID so the client
+        // silently re-initializes after a server restart.
         if (sessionId) {
           return res.status(404).json({
             jsonrpc: "2.0",
@@ -544,8 +531,8 @@ async function main() {
         });
 
         const server = createMcpServer();
-        // Don't call server.close() here — McpServer.close() closes the
-        // transport, which re-fires this handler and recurses.
+        // Don't call server.close() — it closes the transport, re-firing
+        // this handler and recursing.
         transport.onclose = () => {
           if (transport.sessionId) {
             sessions.delete(transport.sessionId);
