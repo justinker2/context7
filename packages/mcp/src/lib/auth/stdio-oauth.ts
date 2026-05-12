@@ -228,10 +228,8 @@ async function trySendUrlElicit(server: Server, url: string): Promise<ElicitOutc
       ElicitResult,
       { timeout: ELICIT_TIMEOUT_MS }
     );
-    console.error(`[Context7:auth] URL elicit returned action=${result.action}`);
     return result.action === "accept" ? "accept" : "decline";
-  } catch (err) {
-    console.error("[Context7:auth] URL elicit errored:", err instanceof Error ? err.message : err);
+  } catch {
     return "no-response";
   }
 }
@@ -249,15 +247,13 @@ async function tryFormElicit(server: Server): Promise<ElicitOutcome> {
       ElicitResult,
       { timeout: ELICIT_TIMEOUT_MS }
     );
-    console.error(`[Context7:auth] form elicit returned action=${result.action}`);
     if (result.action === "accept") {
       // Form mode only returns yes/no — open the browser server-side.
       startOAuthFlow({ openInBrowser: true });
       return "accept";
     }
     return "decline";
-  } catch (err) {
-    console.error("[Context7:auth] form elicit errored:", err instanceof Error ? err.message : err);
+  } catch {
     return "no-response";
   }
 }
@@ -266,7 +262,6 @@ async function tryFormElicit(server: Server): Promise<ElicitOutcome> {
  *  (server opens the browser on accept), `no-response` if neither works. */
 export async function tryElicitSignIn(server: Server): Promise<ElicitOutcome> {
   const caps = clientElicitCaps(server);
-  console.error(`[Context7:auth] elicit caps form=${caps.form} url=${caps.url}`);
 
   if (caps.url) {
     const url = startOAuthFlow({ openInBrowser: false });

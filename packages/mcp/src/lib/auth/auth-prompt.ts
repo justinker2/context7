@@ -15,7 +15,6 @@ export function forgetPromptState(key: string): void {
   stateByKey.delete(key);
 }
 
-/** Fires at most once per state key. Authenticated calls are skipped. */
 export function recordCallAndDecide(stateKey: string, hasAuth: boolean): boolean {
   if (hasAuth) return false;
   const s = stateByKey.get(stateKey) ?? { count: 0, fired: false };
@@ -28,7 +27,6 @@ export function recordCallAndDecide(stateKey: string, hasAuth: boolean): boolean
   return true;
 }
 
-/** Empty string when unknown — the CLI falls back to interactive setup. */
 export function clientFlagForCli(ide: string | undefined): string {
   if (!ide) return "";
   const lower = ide.toLowerCase();
@@ -42,7 +40,6 @@ export function clientFlagForCli(ide: string | undefined): string {
 
 export interface BuildAuthPromptOptions {
   clientIde?: string;
-  /** Set when the API returned a rate-limit / quota error. */
   rateLimited?: boolean;
 }
 
