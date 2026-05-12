@@ -21,6 +21,7 @@ import {
   OPENAI_APPS_CHALLENGE_TOKEN,
 } from "./lib/constants.js";
 import { recordCallAndDecide, buildAuthPrompt, forgetPromptState } from "./lib/auth/auth-prompt.js";
+import { loadStdioToken, tryElicitSignIn } from "./lib/auth/stdio-oauth.js";
 
 /** Default HTTP server port */
 const DEFAULT_PORT = 3000;
@@ -85,15 +86,12 @@ let stdioClientInfo: { ide?: string; version?: string } | undefined;
  */
 function getClientContext(): ClientContext {
   const ctx = requestContext.getStore();
+  if (ctx) return ctx;
 
-  // HTTP mode: context is fully populated from request
-  if (ctx) {
-    return ctx;
-  }
-
-  // stdio mode: use globals
+  // stdio mode reads credentials.json each call so the same long-running
+  // process picks up tokens an in-flight OAuth-via-elicit flow just wrote.
   return {
-    apiKey: stdioApiKey,
+    apiKey: stdioApiKey ?? loadStdioToken(),
     clientInfo: stdioClientInfo,
     transport: "stdio",
   };
@@ -101,13 +99,25 @@ function getClientContext(): ClientContext {
 
 type ToolResult = { content: { type: "text"; text: string }[] };
 
-function withAuthPrompt<A>(handler: (a: A) => Promise<ToolResult>): (a: A) => Promise<ToolResult> {
+function withAuthPrompt<A>(
+  server: McpServer,
+  handler: (a: A) => Promise<ToolResult>
+): (a: A) => Promise<ToolResult> {
   return async (args) => {
     const result = await handler(args);
     const ctx = getClientContext();
     const stateKey = ctx.sessionId ?? "stdio";
     const shouldFire = recordCallAndDecide(stateKey, Boolean(ctx.apiKey));
     if (!shouldFire || result.content.length === 0) return result;
+
+    // Stdio: server runs on the user's machine, so we drive OAuth directly
+    // via elicit + localhost callback. On accept the next call picks up
+    // the token from credentials.json. On decline or no-response, fall
+    // through to the inline text nudge.
+    if (ctx.transport === "stdio") {
+      const outcome = await tryElicitSignIn(server.server);
+      if (outcome === "accept") return result;
+    }
 
     const rateLimited = result.content.some(
       (c) => c.type === "text" && /quota exceeded|rate.?limit/i.test(c.text)
@@ -229,37 +239,40 @@ IMPORTANT: Do not call this tool more than 3 times per question. If you cannot f
         idempotentHint: true,
       },
     },
-    withAuthPrompt(async ({ query, libraryName }: { query: string; libraryName: string }) => {
-      const searchResponse = await searchLibraries(query, libraryName, getClientContext());
+    withAuthPrompt(
+      server,
+      async ({ query, libraryName }: { query: string; libraryName: string }) => {
+        const searchResponse = await searchLibraries(query, libraryName, getClientContext());
 
-      if (!searchResponse.results || searchResponse.results.length === 0) {
+        if (!searchResponse.results || searchResponse.results.length === 0) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: searchResponse.error
+                  ? searchResponse.error
+                  : "No libraries found matching the provided name.",
+              },
+            ],
+          };
+        }
+
+        const resultsText = formatSearchResults(searchResponse);
+
+        const responseText = `Available Libraries:
+
+${resultsText}`;
+
         return {
           content: [
             {
               type: "text" as const,
-              text: searchResponse.error
-                ? searchResponse.error
-                : "No libraries found matching the provided name.",
+              text: responseText,
             },
           ],
         };
       }
-
-      const resultsText = formatSearchResults(searchResponse);
-
-      const responseText = `Available Libraries:
-
-${resultsText}`;
-
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: responseText,
-          },
-        ],
-      };
-    })
+    )
   );
 
   server.registerTool(
@@ -290,7 +303,7 @@ Do not call this tool more than 3 times per question.`,
         idempotentHint: true,
       },
     },
-    withAuthPrompt(async ({ query, libraryId }: { query: string; libraryId: string }) => {
+    withAuthPrompt(server, async ({ query, libraryId }: { query: string; libraryId: string }) => {
       const response = await fetchLibraryContext({ query, libraryId }, getClientContext());
 
       return {
