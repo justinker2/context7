@@ -10,14 +10,17 @@ import { formatSearchResults, extractClientInfoFromUserAgent } from "./lib/utils
 import { isJWT, validateJWT } from "./lib/jwt.js";
 import express from "express";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { Command } from "commander";
 import { AsyncLocalStorage } from "async_hooks";
+import { randomUUID } from "crypto";
 import {
   SERVER_VERSION,
   RESOURCE_URL,
   AUTH_SERVER_URL,
   OPENAI_APPS_CHALLENGE_TOKEN,
 } from "./lib/constants.js";
+import { recordCallAndDecide, buildCliNudge, forgetNudgeState } from "./lib/auth/cli-nudge.js";
 
 /** Default HTTP server port */
 const DEFAULT_PORT = 3000;
@@ -93,6 +96,35 @@ function getClientContext(): ClientContext {
     apiKey: stdioApiKey,
     clientInfo: stdioClientInfo,
     transport: "stdio",
+  };
+}
+
+type ToolResult = { content: { type: "text"; text: string }[] };
+
+/**
+ * Wrap a tool handler so anonymous use triggers a one-time "sign in via
+ * `ctx7 setup` CLI" nudge appended to the tool's text result. The agent
+ * surfaces it and (with user confirmation) runs the embedded command —
+ * which does OAuth on the user's machine and writes the bearer into their
+ * MCP client config. Server never sees a token at rest.
+ */
+function withCliNudge<A>(handler: (a: A) => Promise<ToolResult>): (a: A) => Promise<ToolResult> {
+  return async (args) => {
+    const result = await handler(args);
+    const ctx = getClientContext();
+    const stateKey = ctx.sessionId ?? "stdio";
+    const shouldFire = recordCallAndDecide(stateKey, Boolean(ctx.apiKey));
+    if (!shouldFire || result.content.length === 0) return result;
+
+    const rateLimited = result.content.some(
+      (c) => c.type === "text" && /quota exceeded|rate.?limit/i.test(c.text)
+    );
+    const nudge = buildCliNudge({ clientIde: ctx.clientInfo?.ide, rateLimited });
+    const last = result.content[result.content.length - 1];
+    if (last.type === "text") {
+      last.text = `${last.text}\n\n${nudge}`;
+    }
+    return result;
   };
 }
 
@@ -204,14 +236,14 @@ IMPORTANT: Do not call this tool more than 3 times per question. If you cannot f
         idempotentHint: true,
       },
     },
-    async ({ query, libraryName }) => {
+    withCliNudge(async ({ query, libraryName }: { query: string; libraryName: string }) => {
       const searchResponse = await searchLibraries(query, libraryName, getClientContext());
 
       if (!searchResponse.results || searchResponse.results.length === 0) {
         return {
           content: [
             {
-              type: "text",
+              type: "text" as const,
               text: searchResponse.error
                 ? searchResponse.error
                 : "No libraries found matching the provided name.",
@@ -229,12 +261,12 @@ ${resultsText}`;
       return {
         content: [
           {
-            type: "text",
+            type: "text" as const,
             text: responseText,
           },
         ],
       };
-    }
+    })
   );
 
   server.registerTool(
@@ -265,18 +297,18 @@ Do not call this tool more than 3 times per question.`,
         idempotentHint: true,
       },
     },
-    async ({ query, libraryId }) => {
+    withCliNudge(async ({ query, libraryId }: { query: string; libraryId: string }) => {
       const response = await fetchLibraryContext({ query, libraryId }, getClientContext());
 
       return {
         content: [
           {
-            type: "text",
+            type: "text" as const,
             text: response.data,
           },
         ],
       };
-    }
+    })
   );
 
   return server;
@@ -387,22 +419,21 @@ async function main() {
       );
     };
 
+    // Stateful session registry. Each HTTP session has its own bound
+    // transport + server pair and its own anonymous-call counter, so the
+    // CLI nudge fires at most once per session.
+    interface Session {
+      transport: StreamableHTTPServerTransport;
+      server: ReturnType<typeof createMcpServer>;
+      context: ClientContext;
+    }
+    const sessions = new Map<string, Session>();
+
     const handleMcpRequest = async (
       req: express.Request,
       res: express.Response,
       requireAuth: boolean
     ) => {
-      // Reject GET requests — this server is stateless and does not send server-initiated
-      // notifications, so SSE streams serve no purpose and cause mass NGINX timeouts.
-      // Returning 405 is spec-compliant per MCP StreamableHTTP (2025-03-26).
-      if (req.method === "GET") {
-        return res.status(405).json({
-          jsonrpc: "2.0",
-          error: { code: -32000, message: "Server does not support GET requests" },
-          id: null,
-        });
-      }
-
       try {
         const apiKey = extractApiKey(req);
         const resourceUrl = RESOURCE_URL;
@@ -441,6 +472,53 @@ async function main() {
           }
         }
 
+        const sessionId = extractHeaderValue(req.headers["mcp-session-id"]);
+        const body = req.body as { method?: string } | undefined;
+
+        // Existing session — reuse the transport for POST (subsequent
+        // JSON-RPC), GET (standalone SSE stream), and DELETE.
+        if (sessionId && sessions.has(sessionId)) {
+          const session = sessions.get(sessionId)!;
+          // Prefer the canonical name from the initialize handshake over
+          // whatever the User-Agent says — so `--cursor`/`--claude` etc.
+          // map correctly for the CLI nudge.
+          const sdkClientInfo = session.server.server.getClientVersion();
+          const perRequestContext: ClientContext = {
+            ...session.context,
+            apiKey: apiKey ?? session.context.apiKey,
+            clientIp: getClientIp(req) ?? session.context.clientIp,
+            clientInfo: sdkClientInfo
+              ? { ide: sdkClientInfo.name, version: sdkClientInfo.version }
+              : session.context.clientInfo,
+            sessionId,
+          };
+          await requestContext.run(perRequestContext, async () => {
+            await session.transport.handleRequest(req, res, req.body);
+          });
+          return;
+        }
+
+        // Stale session ID (server restart, GC) — per MCP spec, return 404
+        // so the client silently re-initializes. A 400 would be terminal.
+        if (sessionId) {
+          return res.status(404).json({
+            jsonrpc: "2.0",
+            error: { code: -32001, message: "Session not found. Re-initialize." },
+            id: null,
+          });
+        }
+
+        if (req.method !== "POST" || !body || !isInitializeRequest(body)) {
+          return res.status(400).json({
+            jsonrpc: "2.0",
+            error: {
+              code: -32000,
+              message: "Bad Request: missing Mcp-Session-Id header on non-initialize request",
+            },
+            id: null,
+          });
+        }
+
         const context: ClientContext = {
           clientIp: getClientIp(req),
           apiKey: apiKey,
@@ -454,15 +532,26 @@ async function main() {
         // because some MCP HTTP clients cap the underlying fetch at 60s waiting for
         // headers, even though the per-tool timeout is much higher.
         const transport = new StreamableHTTPServerTransport({
-          sessionIdGenerator: undefined,
+          sessionIdGenerator: () => randomUUID(),
           enableJsonResponse: false,
+          onsessioninitialized: (newSessionId) => {
+            sessions.set(newSessionId, { transport, server, context });
+          },
+          onsessionclosed: (closedSessionId) => {
+            sessions.delete(closedSessionId);
+            forgetNudgeState(closedSessionId);
+          },
         });
 
         const server = createMcpServer();
-        res.on("close", () => {
-          transport.close();
-          server.close();
-        });
+        // Don't call server.close() here — McpServer.close() closes the
+        // transport, which re-fires this handler and recurses.
+        transport.onclose = () => {
+          if (transport.sessionId) {
+            sessions.delete(transport.sessionId);
+            forgetNudgeState(transport.sessionId);
+          }
+        };
 
         await requestContext.run(context, async () => {
           installTransportArgAliasing(transport);
