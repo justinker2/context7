@@ -101,6 +101,12 @@ if (PROXY_URL && !PROXY_URL.startsWith("$") && /^(http|https):\/\//i.test(PROXY_
  * @param context Client context including IP, API key, and client info
  * @returns Search results or error
  */
+function readPromptSignal(response: Response, context: ClientContext): void {
+  if (response.headers.get("X-Context7-Auth-Prompt") === "1") {
+    context.shouldPrompt = true;
+  }
+}
+
 export async function searchLibraries(
   query: string,
   libraryName: string,
@@ -114,6 +120,7 @@ export async function searchLibraries(
     const headers = generateHeaders(context);
 
     const response = await fetch(url, { headers });
+    readPromptSignal(response, context);
     if (!response.ok) {
       const errorMessage = await parseErrorResponse(response, context.apiKey);
       console.error(errorMessage);
@@ -146,6 +153,7 @@ export async function fetchLibraryContext(
     const headers = generateHeaders(context);
 
     const response = await fetch(url, { headers });
+    readPromptSignal(response, context);
     if (!response.ok) {
       const errorMessage = await parseErrorResponse(response, context.apiKey);
       console.error(errorMessage);

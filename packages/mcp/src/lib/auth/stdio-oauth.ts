@@ -9,7 +9,7 @@ import { z } from "zod";
 
 const CLI_CLIENT_ID = "2veBSofhicRBguUT";
 const CALLBACK_PORT = 52417;
-const CONTEXT7_BASE_URL = "https://context7.com";
+const CONTEXT7_BASE_URL = process.env.CONTEXT7_AUTH_BASE_URL || "https://context7.com";
 const OAUTH_CALLBACK_TIMEOUT_MS = 5 * 60 * 1000;
 const ELICIT_TIMEOUT_MS = 2 * 60 * 1000;
 

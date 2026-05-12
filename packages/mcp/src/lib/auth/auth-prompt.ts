@@ -1,27 +1,3 @@
-const PROMPT_AFTER_CALLS = 5;
-
-interface PromptState {
-  count: number;
-  fired: boolean;
-}
-
-const stateByKey = new Map<string, PromptState>();
-
-export function forgetPromptState(key: string): void {
-  stateByKey.delete(key);
-}
-
-export function recordCallAndDecide(stateKey: string, hasAuth: boolean): boolean {
-  if (hasAuth) return false;
-  const s = stateByKey.get(stateKey) ?? { count: 0, fired: false };
-  s.count += 1;
-  stateByKey.set(stateKey, s);
-  if (s.fired) return false;
-  if (s.count < PROMPT_AFTER_CALLS) return false;
-  s.fired = true;
-  return true;
-}
-
 export function clientFlagForCli(ide: string | undefined): string {
   if (!ide) return "";
   const lower = ide.toLowerCase();

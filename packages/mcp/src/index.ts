@@ -10,17 +10,15 @@ import { formatSearchResults, extractClientInfoFromUserAgent } from "./lib/utils
 import { isJWT, validateJWT } from "./lib/jwt.js";
 import express from "express";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { Command } from "commander";
 import { AsyncLocalStorage } from "async_hooks";
-import { randomUUID } from "crypto";
 import {
   SERVER_VERSION,
   RESOURCE_URL,
   AUTH_SERVER_URL,
   OPENAI_APPS_CHALLENGE_TOKEN,
 } from "./lib/constants.js";
-import { recordCallAndDecide, buildAuthPrompt, forgetPromptState } from "./lib/auth/auth-prompt.js";
+import { buildAuthPrompt } from "./lib/auth/auth-prompt.js";
 import { loadStdioToken, tryElicitSignIn } from "./lib/auth/stdio-oauth.js";
 
 /** Default HTTP server port */
@@ -104,11 +102,20 @@ function withAuthPrompt<A>(
   handler: (a: A) => Promise<ToolResult>
 ): (a: A) => Promise<ToolResult> {
   return async (args) => {
-    const result = await handler(args);
-    const ctx = getClientContext();
-    const stateKey = ctx.sessionId ?? "stdio";
-    const shouldFire = recordCallAndDecide(stateKey, Boolean(ctx.apiKey));
-    if (!shouldFire || result.content.length === 0) return result;
+    // stdio gets a fresh per-call context wired through AsyncLocalStorage
+    // so the upstream API layer and this wrapper see the same mutable
+    // object (the API layer sets `shouldPrompt` when the backend signals).
+    const inherited = requestContext.getStore();
+    const ctx: ClientContext = inherited ?? {
+      apiKey: stdioApiKey ?? loadStdioToken(),
+      clientInfo: stdioClientInfo,
+      transport: "stdio",
+    };
+    const result = inherited
+      ? await handler(args)
+      : await requestContext.run(ctx, () => handler(args));
+
+    if (ctx.apiKey || !ctx.shouldPrompt || result.content.length === 0) return result;
 
     // Stdio: server runs on the user's machine, so we drive OAuth directly
     // via elicit + localhost callback. On accept the next call picks up
@@ -425,18 +432,22 @@ async function main() {
       );
     };
 
-    interface Session {
-      transport: StreamableHTTPServerTransport;
-      server: ReturnType<typeof createMcpServer>;
-      context: ClientContext;
-    }
-    const sessions = new Map<string, Session>();
-
     const handleMcpRequest = async (
       req: express.Request,
       res: express.Response,
       requireAuth: boolean
     ) => {
+      // Reject GET requests — this server is stateless and does not send server-initiated
+      // notifications, so SSE streams serve no purpose and cause mass NGINX timeouts.
+      // Returning 405 is spec-compliant per MCP StreamableHTTP (2025-03-26).
+      if (req.method === "GET") {
+        return res.status(405).json({
+          jsonrpc: "2.0",
+          error: { code: -32000, message: "Server does not support GET requests" },
+          id: null,
+        });
+      }
+
       try {
         const apiKey = extractApiKey(req);
         const resourceUrl = RESOURCE_URL;
@@ -475,50 +486,6 @@ async function main() {
           }
         }
 
-        const sessionId = extractHeaderValue(req.headers["mcp-session-id"]);
-        const body = req.body as { method?: string } | undefined;
-
-        if (sessionId && sessions.has(sessionId)) {
-          const session = sessions.get(sessionId)!;
-          // Prefer initialize-handshake clientInfo over User-Agent — that's
-          // what makes the auth-prompt's --cursor/--claude/... map right.
-          const sdkClientInfo = session.server.server.getClientVersion();
-          const perRequestContext: ClientContext = {
-            ...session.context,
-            apiKey: apiKey ?? session.context.apiKey,
-            clientIp: getClientIp(req) ?? session.context.clientIp,
-            clientInfo: sdkClientInfo
-              ? { ide: sdkClientInfo.name, version: sdkClientInfo.version }
-              : session.context.clientInfo,
-            sessionId,
-          };
-          await requestContext.run(perRequestContext, async () => {
-            await session.transport.handleRequest(req, res, req.body);
-          });
-          return;
-        }
-
-        // Per MCP spec: 404 (not 400) on unknown session ID so the client
-        // silently re-initializes after a server restart.
-        if (sessionId) {
-          return res.status(404).json({
-            jsonrpc: "2.0",
-            error: { code: -32001, message: "Session not found. Re-initialize." },
-            id: null,
-          });
-        }
-
-        if (req.method !== "POST" || !body || !isInitializeRequest(body)) {
-          return res.status(400).json({
-            jsonrpc: "2.0",
-            error: {
-              code: -32000,
-              message: "Bad Request: missing Mcp-Session-Id header on non-initialize request",
-            },
-            id: null,
-          });
-        }
-
         const context: ClientContext = {
           clientIp: getClientIp(req),
           apiKey: apiKey,
@@ -532,26 +499,15 @@ async function main() {
         // because some MCP HTTP clients cap the underlying fetch at 60s waiting for
         // headers, even though the per-tool timeout is much higher.
         const transport = new StreamableHTTPServerTransport({
-          sessionIdGenerator: () => randomUUID(),
+          sessionIdGenerator: undefined,
           enableJsonResponse: false,
-          onsessioninitialized: (newSessionId) => {
-            sessions.set(newSessionId, { transport, server, context });
-          },
-          onsessionclosed: (closedSessionId) => {
-            sessions.delete(closedSessionId);
-            forgetPromptState(closedSessionId);
-          },
         });
 
         const server = createMcpServer();
-        // Don't call server.close() — it closes the transport, re-firing
-        // this handler and recursing.
-        transport.onclose = () => {
-          if (transport.sessionId) {
-            sessions.delete(transport.sessionId);
-            forgetPromptState(transport.sessionId);
-          }
-        };
+        res.on("close", () => {
+          transport.close();
+          server.close();
+        });
 
         await requestContext.run(context, async () => {
           installTransportArgAliasing(transport);

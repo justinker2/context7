@@ -36,8 +36,9 @@ export interface ClientContext {
     version?: string;
   };
   transport?: "stdio" | "http";
-  /** MCP session ID (HTTP transport). Keys per-session auth-prompt state. */
-  sessionId?: string;
+  /** Mutable: set by the upstream API layer when the backend signals the
+   *  client should be prompted to sign in. Read by the auth-prompt wrapper. */
+  shouldPrompt?: boolean;
 }
 
 /**
