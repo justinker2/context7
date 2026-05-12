@@ -199,7 +199,7 @@ const ElicitResult = z.object({
 type ElicitOutcome = "accept" | "decline" | "no-response";
 
 const PROMPT_MESSAGE =
-  "Sign in to Context7 for higher rate limits and personalized results. Accept to open the sign-in page in your browser.";
+  "Sign in to Context7 for higher rate limits. Accept to open the sign-in page in your browser.";
 
 function clientElicitCaps(server: Server): { form: boolean; url: boolean } {
   const caps = server.getClientCapabilities();

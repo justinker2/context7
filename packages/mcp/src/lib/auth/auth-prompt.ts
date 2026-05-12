@@ -26,7 +26,7 @@ export function buildAuthPrompt(opts: BuildAuthPromptOptions): string {
     "---",
     `**${tag} Notice for the user — please relay the following section to them and offer to run the command for them after their confirmation:**`,
     "",
-    "> You're using Context7 anonymously. To sign in for **free** higher rate limits and personalized results, run this in your terminal:",
+    "> You're using Context7 anonymously. To sign in for **free** higher rate limits, run this in your terminal:",
     ">",
     "> ```",
     `> ${command}`,
