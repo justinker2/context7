@@ -1,8 +1,4 @@
-const PROMPT_AFTER_CALLS = (() => {
-  const raw = parseInt(process.env.CONTEXT7_PROMPT_AFTER_CALLS ?? "", 10);
-  return Number.isFinite(raw) && raw > 0 ? raw : 5;
-})();
-const FORCE_PROMPT = process.env.CONTEXT7_FORCE_PROMPT === "1";
+const PROMPT_AFTER_CALLS = 5;
 
 interface PromptState {
   count: number;
@@ -21,8 +17,7 @@ export function recordCallAndDecide(stateKey: string, hasAuth: boolean): boolean
   s.count += 1;
   stateByKey.set(stateKey, s);
   if (s.fired) return false;
-  const threshold = FORCE_PROMPT ? 1 : PROMPT_AFTER_CALLS;
-  if (s.count < threshold) return false;
+  if (s.count < PROMPT_AFTER_CALLS) return false;
   s.fired = true;
   return true;
 }
