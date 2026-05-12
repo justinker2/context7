@@ -20,7 +20,7 @@ import {
   AUTH_SERVER_URL,
   OPENAI_APPS_CHALLENGE_TOKEN,
 } from "./lib/constants.js";
-import { recordCallAndDecide, buildCliNudge, forgetNudgeState } from "./lib/auth/cli-nudge.js";
+import { recordCallAndDecide, buildAuthPrompt, forgetPromptState } from "./lib/auth/auth-prompt.js";
 
 /** Default HTTP server port */
 const DEFAULT_PORT = 3000;
@@ -103,12 +103,12 @@ type ToolResult = { content: { type: "text"; text: string }[] };
 
 /**
  * Wrap a tool handler so anonymous use triggers a one-time "sign in via
- * `ctx7 setup` CLI" nudge appended to the tool's text result. The agent
+ * `ctx7 setup` CLI" notice appended to the tool's text result. The agent
  * surfaces it and (with user confirmation) runs the embedded command —
  * which does OAuth on the user's machine and writes the bearer into their
  * MCP client config. Server never sees a token at rest.
  */
-function withCliNudge<A>(handler: (a: A) => Promise<ToolResult>): (a: A) => Promise<ToolResult> {
+function withAuthPrompt<A>(handler: (a: A) => Promise<ToolResult>): (a: A) => Promise<ToolResult> {
   return async (args) => {
     const result = await handler(args);
     const ctx = getClientContext();
@@ -119,10 +119,10 @@ function withCliNudge<A>(handler: (a: A) => Promise<ToolResult>): (a: A) => Prom
     const rateLimited = result.content.some(
       (c) => c.type === "text" && /quota exceeded|rate.?limit/i.test(c.text)
     );
-    const nudge = buildCliNudge({ clientIde: ctx.clientInfo?.ide, rateLimited });
+    const prompt = buildAuthPrompt({ clientIde: ctx.clientInfo?.ide, rateLimited });
     const last = result.content[result.content.length - 1];
     if (last.type === "text") {
-      last.text = `${last.text}\n\n${nudge}`;
+      last.text = `${last.text}\n\n${prompt}`;
     }
     return result;
   };
@@ -236,7 +236,7 @@ IMPORTANT: Do not call this tool more than 3 times per question. If you cannot f
         idempotentHint: true,
       },
     },
-    withCliNudge(async ({ query, libraryName }: { query: string; libraryName: string }) => {
+    withAuthPrompt(async ({ query, libraryName }: { query: string; libraryName: string }) => {
       const searchResponse = await searchLibraries(query, libraryName, getClientContext());
 
       if (!searchResponse.results || searchResponse.results.length === 0) {
@@ -297,7 +297,7 @@ Do not call this tool more than 3 times per question.`,
         idempotentHint: true,
       },
     },
-    withCliNudge(async ({ query, libraryId }: { query: string; libraryId: string }) => {
+    withAuthPrompt(async ({ query, libraryId }: { query: string; libraryId: string }) => {
       const response = await fetchLibraryContext({ query, libraryId }, getClientContext());
 
       return {
@@ -421,7 +421,7 @@ async function main() {
 
     // Stateful session registry. Each HTTP session has its own bound
     // transport + server pair and its own anonymous-call counter, so the
-    // CLI nudge fires at most once per session.
+    // auth prompt fires at most once per session.
     interface Session {
       transport: StreamableHTTPServerTransport;
       server: ReturnType<typeof createMcpServer>;
@@ -481,7 +481,7 @@ async function main() {
           const session = sessions.get(sessionId)!;
           // Prefer the canonical name from the initialize handshake over
           // whatever the User-Agent says — so `--cursor`/`--claude` etc.
-          // map correctly for the CLI nudge.
+          // map correctly for the auth prompt.
           const sdkClientInfo = session.server.server.getClientVersion();
           const perRequestContext: ClientContext = {
             ...session.context,
@@ -539,7 +539,7 @@ async function main() {
           },
           onsessionclosed: (closedSessionId) => {
             sessions.delete(closedSessionId);
-            forgetNudgeState(closedSessionId);
+            forgetPromptState(closedSessionId);
           },
         });
 
@@ -549,7 +549,7 @@ async function main() {
         transport.onclose = () => {
           if (transport.sessionId) {
             sessions.delete(transport.sessionId);
-            forgetNudgeState(transport.sessionId);
+            forgetPromptState(transport.sessionId);
           }
         };
 

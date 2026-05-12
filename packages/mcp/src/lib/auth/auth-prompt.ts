@@ -4,24 +4,24 @@ const PROMPT_AFTER_CALLS = (() => {
 })();
 const FORCE_PROMPT = process.env.CONTEXT7_FORCE_PROMPT === "1";
 
-interface NudgeState {
+interface PromptState {
   count: number;
   fired: boolean;
 }
 
 // Keyed by HTTP session ID, or the literal "stdio" in stdio mode. The
 // server is a single process per stdio user, so one bucket is enough there.
-const stateByKey = new Map<string, NudgeState>();
+const stateByKey = new Map<string, PromptState>();
 
 /** Drop a session's state when the session closes — prevents unbounded growth. */
-export function forgetNudgeState(key: string): void {
+export function forgetPromptState(key: string): void {
   stateByKey.delete(key);
 }
 
 /**
- * Record one anonymous tool call and decide whether the CLI nudge should
- * fire on this call's response. Fires at most once per state key; resets
- * if the call was authenticated.
+ * Record one anonymous tool call and decide whether the auth prompt should
+ * fire on this call's response. Fires at most once per state key; the
+ * call is ignored if it was authenticated.
  */
 export function recordCallAndDecide(stateKey: string, hasAuth: boolean): boolean {
   if (hasAuth) return false;
@@ -51,7 +51,7 @@ export function clientFlagForCli(ide: string | undefined): string {
   return "";
 }
 
-export interface BuildCliNudgeOptions {
+export interface BuildAuthPromptOptions {
   clientIde?: string;
   /** True when the upstream API actually returned a rate-limit / quota
    *  error. Drives the framing of the user-facing notice. */
@@ -64,7 +64,7 @@ export interface BuildCliNudgeOptions {
  * tool result. The agent is expected to surface this to the user and,
  * with their permission, run the embedded command via its shell tool.
  */
-export function buildCliNudge(opts: BuildCliNudgeOptions): string {
+export function buildAuthPrompt(opts: BuildAuthPromptOptions): string {
   const flag = clientFlagForCli(opts.clientIde);
   const command = flag ? `npx ctx7 setup ${flag} --mcp -y` : `npx ctx7 setup --mcp`;
   const tag = opts.rateLimited ? "[Rate limit reached]" : "[Heads up]";
