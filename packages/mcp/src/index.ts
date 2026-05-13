@@ -102,9 +102,9 @@ function withAuthPrompt<A>(
   handler: (a: A) => Promise<ToolResult>
 ): (a: A) => Promise<ToolResult> {
   return async (args) => {
-    // stdio gets a fresh per-call context wired through AsyncLocalStorage
-    // so the upstream API layer and this wrapper see the same mutable
-    // object (the API layer sets `shouldPrompt` when the backend signals).
+    // Wire stdio through AsyncLocalStorage so the API layer (which sets
+    // `shouldPrompt` from the backend signal) and this wrapper share the
+    // same mutable context object. HTTP already runs inside `requestContext`.
     const inherited = requestContext.getStore();
     const ctx: ClientContext = inherited ?? {
       apiKey: stdioApiKey ?? loadStdioToken(),
@@ -117,10 +117,9 @@ function withAuthPrompt<A>(
 
     if (ctx.apiKey || !ctx.shouldPrompt || result.content.length === 0) return result;
 
-    // Stdio: server runs on the user's machine, so we drive OAuth directly
-    // via elicit + localhost callback. On accept the next call picks up
-    // the token from credentials.json. On decline or no-response, fall
-    // through to the inline text nudge.
+    // Stdio: server lives on the user's machine — drive OAuth directly via
+    // elicit + localhost callback. Token lands in credentials.json and is
+    // picked up on the next call.
     if (ctx.transport === "stdio") {
       const outcome = await tryElicitSignIn(server.server);
       if (outcome === "accept") return result;

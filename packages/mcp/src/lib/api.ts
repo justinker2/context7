@@ -94,6 +94,12 @@ if (PROXY_URL && !PROXY_URL.startsWith("$") && /^(http|https):\/\//i.test(PROXY_
   }
 }
 
+function readPromptSignal(response: Response, context: ClientContext): void {
+  if (response.headers.get("X-Context7-Auth-Prompt") === "1") {
+    context.shouldPrompt = true;
+  }
+}
+
 /**
  * Searches for libraries matching the given query
  * @param query The user's question or task (used for LLM relevance ranking)
@@ -101,12 +107,6 @@ if (PROXY_URL && !PROXY_URL.startsWith("$") && /^(http|https):\/\//i.test(PROXY_
  * @param context Client context including IP, API key, and client info
  * @returns Search results or error
  */
-function readPromptSignal(response: Response, context: ClientContext): void {
-  if (response.headers.get("X-Context7-Auth-Prompt") === "1") {
-    context.shouldPrompt = true;
-  }
-}
-
 export async function searchLibraries(
   query: string,
   libraryName: string,
