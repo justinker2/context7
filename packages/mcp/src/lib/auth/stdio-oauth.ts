@@ -71,7 +71,11 @@ function openBrowser(url: string): void {
     process.platform === "darwin" ? "open" : process.platform === "win32" ? "cmd" : "xdg-open";
   const args = process.platform === "win32" ? ["/c", "start", "", url] : [url];
   try {
-    spawn(cmd, args, { detached: true, stdio: "ignore" }).unref();
+    const child = spawn(cmd, args, { detached: true, stdio: "ignore" });
+    // spawn errors (e.g. xdg-open missing on a headless box) arrive async,
+    // not via the synchronous try/catch.
+    child.on("error", (error) => console.error("[Context7] Failed to open browser:", error));
+    child.unref();
   } catch (error) {
     console.error("[Context7] Failed to open browser:", error);
   }

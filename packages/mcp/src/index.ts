@@ -119,10 +119,12 @@ function withAuthPrompt<A>(
 
     // Stdio: server lives on the user's machine — drive OAuth directly via
     // elicit + localhost callback. Token lands in credentials.json and is
-    // picked up on the next call.
+    // picked up on the next call. Fall through to the text nudge only when
+    // elicit isn't supported (no-response); a decline means the user saw
+    // the dialog and said no, don't double-prompt.
     if (ctx.transport === "stdio") {
       const outcome = await tryElicitSignIn(server.server);
-      if (outcome === "accept") return result;
+      if (outcome !== "no-response") return result;
     }
 
     const rateLimited = result.content.some(
