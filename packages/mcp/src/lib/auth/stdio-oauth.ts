@@ -25,14 +25,43 @@ interface TokenData {
   scope?: string;
 }
 
-export function loadStdioToken(): string | undefined {
+function readTokens(): TokenData | undefined {
   try {
     const raw = fs.readFileSync(CREDENTIALS_FILE, "utf-8");
     const tokens = JSON.parse(raw) as TokenData;
-    if (!tokens.access_token) return undefined;
-    if (tokens.expires_at && Date.now() > tokens.expires_at - 60_000) return undefined;
-    return tokens.access_token;
+    return tokens.access_token ? tokens : undefined;
   } catch {
+    return undefined;
+  }
+}
+
+function isExpired(tokens: TokenData): boolean {
+  return Boolean(tokens.expires_at && Date.now() > tokens.expires_at - 60_000);
+}
+
+/**
+ * Returns the current access token, refreshing via `refresh_token` if it's
+ * expired (or near expiry). Returns undefined when no creds exist or
+ * refresh fails — caller treats that as anonymous.
+ */
+export async function loadStdioToken(): Promise<string | undefined> {
+  const tokens = readTokens();
+  if (!tokens) return undefined;
+  if (!isExpired(tokens)) return tokens.access_token;
+  if (!tokens.refresh_token) return undefined;
+  try {
+    const fresh = await refreshAccessToken(tokens.refresh_token);
+    if (!fresh.access_token) throw new Error("refresh response missing access_token");
+    // Preserve the existing refresh_token if the provider didn't rotate
+    // (some OAuth servers omit `refresh_token` on the refresh response and
+    // expect the caller to keep using the original).
+    saveStdioToken({
+      ...fresh,
+      refresh_token: fresh.refresh_token ?? tokens.refresh_token,
+    });
+    return fresh.access_token;
+  } catch (err) {
+    console.error("[Context7] Token refresh failed:", err);
     return undefined;
   }
 }
@@ -158,6 +187,28 @@ async function exchangeCode(
     };
     throw new Error(
       body.error_description || body.error || `Token exchange failed (${response.status})`
+    );
+  }
+  return (await response.json()) as TokenData;
+}
+
+async function refreshAccessToken(refreshToken: string): Promise<TokenData> {
+  const response = await fetch(`${CONTEXT7_BASE_URL}/api/oauth/token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "refresh_token",
+      client_id: CLI_CLIENT_ID,
+      refresh_token: refreshToken,
+    }).toString(),
+  });
+  if (!response.ok) {
+    const body = (await response.json().catch(() => ({}))) as {
+      error?: string;
+      error_description?: string;
+    };
+    throw new Error(
+      body.error_description || body.error || `Token refresh failed (${response.status})`
     );
   }
   return (await response.json()) as TokenData;

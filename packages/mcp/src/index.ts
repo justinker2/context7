@@ -82,14 +82,15 @@ let stdioClientInfo: { ide?: string; version?: string } | undefined;
 /**
  * Get the effective client context
  */
-function getClientContext(): ClientContext {
+async function getClientContext(): Promise<ClientContext> {
   const ctx = requestContext.getStore();
   if (ctx) return ctx;
 
-  // stdio mode reads credentials.json each call so the same long-running
-  // process picks up tokens an in-flight OAuth-via-elicit flow just wrote.
+  // stdio reads credentials.json each call so the same long-running process
+  // picks up tokens an in-flight OAuth flow just wrote; refresh happens
+  // transparently inside loadStdioToken when the access token expires.
   return {
-    apiKey: stdioApiKey ?? loadStdioToken(),
+    apiKey: stdioApiKey ?? (await loadStdioToken()),
     clientInfo: stdioClientInfo,
     transport: "stdio",
   };
@@ -107,7 +108,7 @@ function withAuthPrompt<A>(
     // same mutable context object. HTTP already runs inside `requestContext`.
     const inherited = requestContext.getStore();
     const ctx: ClientContext = inherited ?? {
-      apiKey: stdioApiKey ?? loadStdioToken(),
+      apiKey: stdioApiKey ?? (await loadStdioToken()),
       clientInfo: stdioClientInfo,
       transport: "stdio",
     };
@@ -250,7 +251,7 @@ IMPORTANT: Do not call this tool more than 3 times per question. If you cannot f
     withAuthPrompt(
       server,
       async ({ query, libraryName }: { query: string; libraryName: string }) => {
-        const searchResponse = await searchLibraries(query, libraryName, getClientContext());
+        const searchResponse = await searchLibraries(query, libraryName, await getClientContext());
 
         if (!searchResponse.results || searchResponse.results.length === 0) {
           return {
@@ -312,7 +313,7 @@ Do not call this tool more than 3 times per question.`,
       },
     },
     withAuthPrompt(server, async ({ query, libraryId }: { query: string; libraryId: string }) => {
-      const response = await fetchLibraryContext({ query, libraryId }, getClientContext());
+      const response = await fetchLibraryContext({ query, libraryId }, await getClientContext());
 
       return {
         content: [
